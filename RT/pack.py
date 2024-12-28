@@ -12,11 +12,10 @@ from scipy.spatial import ConvexHull
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from Params import args
+import logging
 
-def calc_one_position_lb_greedy_3d(block, block_index, container_size, reward_type,
-                                   container, positions, stable, heightmap, valid_size, empty_size):
+def calc_one_position_lb_greedy_3d(block, block_index, container_size, positions, heightmap, valid_size):
 
-    block_dim = len(block)  # 3D
     block_x, block_y, block_z = block
     valid_size += block_x * block_y * block_z
 
@@ -53,11 +52,12 @@ def calc_one_position_lb_greedy_3d(block, block_index, container_size, reward_ty
                 continue
         if xy not in ems_xy_list:
             ems_xy_list.append(xy)
+    logging.debug(f"ems_xy_list: {ems_xy_list}")
 
     # sort by y coordinate, then x
     def y_first(pos):
         return pos[1]
-
+    # 升序
     ems_xy_list.sort(key=y_first, reverse=False)
 
     # get ems_list
@@ -69,101 +69,30 @@ def calc_one_position_lb_greedy_3d(block, block_index, container_size, reward_ty
         z = np.max(heightmap[x:x + block_x, y:y + block_y])
         ems_list.append([x, y, z])
 
-    # firt consider the most bottom, sort by z coordinate, then y last x
-    def z_first(pos):
-        return pos[2]
+    logging.debug(f"ems_list: {ems_list}")
 
-    ems_list.sort(key=z_first, reverse=False)
+    # firt consider the most bottom, sort by z coordinate, then y last x
+    ems_list.sort(key=lambda pos: (pos[2], pos[1], pos[0]))
 
     # if no ems found
     if len(ems_list) == 0:
         valid_size -= block_x * block_y * block_z
-        stable[block_index] = False
-        return container, positions, stable, heightmap, valid_size, empty_size
-
-    # varients to store results of searching ems corners
-    ems_num = len(ems_list)
-    pos_ems = np.zeros((ems_num, block_dim)).astype(int)
-    is_settle_ems = [False] * ems_num
-    is_stable_ems = [False] * ems_num
-    compactness_ems = [0.0] * ems_num
-    pyramidality_ems = [0.0] * ems_num
-    stability_ems = [0.0] * ems_num
-    empty_ems = [empty_size] * ems_num
-    under_space_mask = [[]] * ems_num
-    heightmap_ems = [np.zeros(container_size[:-1]).astype(int)] * ems_num
-    visited = []
-
-    # check if a position suitable
-    def check_position(index, _x, _y, _z):
-        # check if the pos visited
-        # print(index, _x, _y, _z)
-        if [_x, _y, _z] in visited: return
-        if _z > 0 and (container[_x:_x + block_x, _y:_y + block_y, _z - 1] == 0).all(): return
-        visited.append([_x, _y, _z])
-        if (container[_x:_x + block_x, _y:_y + block_y, _z] == 0).all():
-            if not is_stable(block, np.array([_x, _y, _z]), container):
-                if reward_type.endswith('hard'):
-                    return
-            else:
-                is_stable_ems[index] = True
-            pos_ems[index] = np.array([_x, _y, _z])
-            heightmap_ems[index][_x:_x + block_x, _y:_y + block_y] = _z + block_z
-            is_settle_ems[index] = True
-
-    # calculate socres
-    def calc_C_P_S(index):
-        _x, _y, _z = pos_ems[index]
-        # compactness
-        height = np.max(heightmap_ems[index])
-        bbox_size = height * container_size[0] * container_size[1]
-        compactness_ems[index] = valid_size / bbox_size
-        # pyramidality
-        under_space = container[_x:_x + block_x, _y:_y + block_y, 0:_z]
-        under_space_mask[index] = under_space == 0
-        empty_ems[index] += np.sum(under_space_mask[index])
-        if 'P' in reward_type:
-            pyramidality_ems[index] = valid_size / (empty_ems[index] + valid_size)
-        # stability
-        if 'S' in reward_type:
-            stable_num = np.sum(stable[:block_index]) + np.sum(is_stable_ems[index])
-            stability_ems[index] = stable_num / (block_index + 1)
-
-    # search positions in each ems
-    X = int(container_size[0] - block_x + 1)
-    Y = int(container_size[1] - block_y + 1)
-    for ems_index, ems in enumerate(ems_list):
-        # using buttom-left strategy in each ems
-        heightmap_ems[ems_index] = heightmap.copy()
-        X0, Y0, _z = ems
-        for _x, _y in itertools.product(range(X0, X), range(Y0, Y)):
-            if is_settle_ems[ems_index]: break
-            check_position(ems_index, _x, _y, _z)
-        if is_settle_ems[ems_index]: calc_C_P_S(ems_index)
-
-    # if the block has not been settled
-    if np.sum(is_settle_ems) == 0:
-        valid_size -= block_x * block_y * block_z
-        stable[block_index] = False
-        return container, positions, stable, heightmap, valid_size, empty_size
-
-    # get the best ems
-    ratio_ems = [c + p + s for c, p, s in zip(compactness_ems, pyramidality_ems, stability_ems)]
-    best_ems_index = np.argmax(ratio_ems)
-    while not is_settle_ems[best_ems_index]:
-        ratio_ems.remove(ratio_ems[best_ems_index])
-        best_ems_index = np.argmax(ratio_ems)
+        # TODO: how to deal with stable and return values
+        return positions, heightmap, valid_size
 
     # update the dynamic parameters
-    _x, _y, _z = pos_ems[best_ems_index]
-    container[_x:_x + block_x, _y:_y + block_y, _z:_z + block_z] = block_index + 1
-    container[_x:_x + block_x, _y:_y + block_y, 0:_z][under_space_mask[best_ems_index]] = -1
-    positions[block_index] = pos_ems[best_ems_index]
-    stable[block_index] = is_stable_ems[best_ems_index]
-    heightmap = heightmap_ems[best_ems_index]
-    empty_size = empty_ems[best_ems_index]
+    best_ems_index = 0
+    _x, _y, _z = ems_list[best_ems_index]
+    # container[_x:_x + block_x, _y:_y + block_y, _z:_z + block_z] = block_index + 1
+    # container[_x:_x + block_x, _y:_y + block_y, 0:_z][under_space_mask[best_ems_index]] = -1
+    positions[block_index] = torch.tensor([_x, _y, _z])
+    heightmap[_x:_x + block_x, _y:_y + block_y] = _z + block_z
+    # stable[block_index] = is_stable_ems[best_ems_index]
+    # heightmap_ems[block_index][_x:_x + block_x, _y:_y + block_y] = _z + block_z
 
-    return container, positions, stable, heightmap, valid_size, empty_size
+    # empty_size = empty_ems[best_ems_index]
+
+    return positions, heightmap, valid_size
 
 def is_stable(block, position, container):
     '''
@@ -223,7 +152,7 @@ def is_stable(block, position, container):
         return hull_path.contains_point((obj_center))
 
 def pack_step(modules, state):
-    hm = np.zeros((state.batch_size, 2, args.bin_x, args.bin_y)).astype(int)
+    hm = np.zeros((state.batch_size, 2, args.bin_x, args.bin_y))
     for i in range(state.batch_size):
         hm_diff_x = np.insert(state.heightmap[i], 0, state.heightmap[i][0, :], axis=0)
         hm_diff_x = np.delete(hm_diff_x, len(hm_diff_x) - 1, axis=0)
@@ -236,65 +165,94 @@ def pack_step(modules, state):
         hm[i][0] = hm_diff_x
         hm[i][1] = hm_diff_y
 
+    # (batch, 2, bin_x, bin_y)
     hm=torch.tensor(hm).float()
     hm=move_to(hm, args.device)
     actor_modules = modules['actor']
 
+    logging.debug(f"packed_state_shape: {state.packed_state.shape}")
+    # batch, box_num, 7
     actor_encoder_out = actor_modules['encoder'](state.packed_state)
+    logging.debug(f"actor_encoder_out_shape: {actor_encoder_out.shape}")
+    # batch, box_num, hidden_size
     if state.index == 0:
-        actor_encoder_out_select = torch.zeros(state.batch_size, 1, 128)
+        actor_encoder_out_select = torch.zeros(state.batch_size, 1, args.hidden_size)
         actor_encoder_out_select = move_to(actor_encoder_out_select, args.device)
     else:
         actor_encoder_out_select = torch.masked_select(actor_encoder_out, state.packed_state[:, :, 0].unsqueeze(-1).bool())
-        actor_encoder_out_select = actor_encoder_out_select.view(state.batch_size, state.index, 128)
+        actor_encoder_out_select = actor_encoder_out_select.view(state.batch_size, state.index, args.hidden_size)
+    # batch, index, hidden_size
 
     actor_encoderheightmap_out=actor_modules["encoderheightmap"](hm)
+    logging.debug(f"actor_encoderheightmap_out_shape: {actor_encoderheightmap_out.shape}")
+    # batch, 1, hidden_size
     q_select=torch.cat((actor_encoder_out_select,actor_encoderheightmap_out),dim=1)
+    logging.debug(f"q_select_shape: {q_select.shape}")
+    # (batch, index+1, hidden_size)
     q_select=torch.mean(q_select,dim=1).unsqueeze(1)
-    # (batch, block, 1)
+    logging.debug(f"q_select_shape: {q_select.shape}")
+    # (batch, 1, hidden_size)
     s_out = actor_modules['s_decoder'](q_select, actor_encoder_out)
+    logging.debug(f"s_out_shape: {s_out.shape}")
+    # (batch, 1, box_num)
     s_log_p, selected = _select_step(s_out.squeeze(1), state.packed_state[:,:,0].bool())
+    logging.debug(f"s_log_p_shape: {s_log_p.shape}")
+    # batch, box_num
+    logging.debug(f"selected_shape: {selected.shape}")
+    # (batch, 1)
 
     # select (batch)
+    logging.debug(f"select box{state.index}")
     state.update_select(selected)
-    # (batch, 2)
-    selected=selected.expand(state.batch_size,128).unsqueeze(1)
+
+    selected=selected.expand(state.batch_size,args.hidden_size).unsqueeze(1)
+    logging.debug(f"selected_shape(after expand): {selected.shape}")
+    # batch, 1, hidden_size
     actor_encoder_out_rotation=torch.gather(actor_encoder_out,1,selected)
+    logging.debug(f"actor_encoder_out_rotation_shape: {actor_encoder_out_rotation.shape}")
+    # batch, 1, hidden_size
 
     q_rotation=torch.cat((actor_encoder_out_rotation,actor_encoderheightmap_out),dim=1)
+    logging.debug(f"q_rotation_shape: {q_rotation.shape}")
+    # batch, 2, hidden_size
     q_rotation=torch.mean(q_rotation,dim=1).unsqueeze(1)
+    logging.debug(f"q_rotation_shape(after mean): {q_rotation.shape}")
+    # batch, 1, hidden_size
 
     r_out = actor_modules['r_decoder'](q_rotation, actor_encoder_out).squeeze(1)
+    logging.debug(f"r_out_shape: {r_out.shape}")
+    # batch, 6
 
     r_log_p, rotation = _rotate_step(r_out.squeeze(-1))
+    logging.debug(f"r_log_p_shape: {r_log_p.shape}")
+    # batch, 6
+    logging.debug(f"rotation_shape: {rotation.shape}")
+    # batch, 1
 
     # rotation
+    logging.debug(f"rotate box{state.index}")
     state.update_rotate(rotation)
     blocks=state.action.get_shape()
     # batch,3
 
     for i,j in enumerate(blocks):
+        # TODO: extend to float
         block = j.int().tolist()
+        logging.debug(f"block{i}_shape: {block}")
+        # [x, y, z]
         block_index = state.index
         container_size = [args.bin_x, args.bin_y, args.bin_z]
-        container = state.container[i]
         positions = state.positions[i]
-        reward_type =state.reward_type
-        stable = state.stable[i]
         valid_size = state.valid_size[i]
         empty_size =state.empty_size[i]
         heightmap = state.heightmap[i]
-        state.container[i], state.positions [i], state.stable[i], state.heightmap[i], state.valid_size[i], state.empty_size[i] = calc_one_position_lb_greedy_3d(
+        state.positions[i], state.heightmap[i], state.valid_size[i] = calc_one_position_lb_greedy_3d(
             block,
             block_index,
             container_size,
-            reward_type,
-            container,
             positions,
-            stable,
             heightmap,
-            valid_size,
-            empty_size
+            valid_size
             )
 
     value = modules['critic'](actor_encoderheightmap_out, actor_encoder_out)
@@ -305,13 +263,17 @@ def pack_step(modules, state):
     return s_log_p, r_log_p, value
 
 def _select_step(s_logits, mask):
-
+    # (batch, box_num) \ (batch, box_num)
     s_logits = s_logits.masked_fill(mask, -np.inf)
 
     s_log_p = F.log_softmax(s_logits, dim=-1)
+    logging.debug(f"s_log_p_shape: {s_log_p.shape}")
+    # (batch, box_num)
 
     # (batch)
     selected = _select(s_log_p.exp()).unsqueeze(-1)
+    logging.debug(f"selected_shape: {selected.shape}")
+    # (batch, 1)
 
     # do not reinforce masked and avoid entropy become nan
     s_log_p = s_log_p.masked_fill(mask, 0)

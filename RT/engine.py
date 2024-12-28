@@ -41,6 +41,10 @@ class trainer():
             # 2. 构造待训练的 batch 数据: batch, box_num, 3
             batch_trn = self.handler.datalist[i] 
             box_num = batch_trn.shape[1]
+            if i == 0:
+                logging.debug(f"box_num: {box_num}")
+                for j in range(box_num):
+                    logging.debug(f"box_shape: {batch_trn[0,j]}")
             batch_trn = torch.Tensor(batch_trn).to(args.device)
             state = StatePack3D(batch_size=bt, box_num=box_num)
             state.update_env(batch_trn, bt)
@@ -52,7 +56,7 @@ class trainer():
     def train_instance(self, state):
         total_losses = torch.tensor([0,0,0,0], dtype=torch.float, device=args.device)
         total_entropy = torch.zeros(1, dtype=torch.float, device=args.device)
-        update_mb_number=int(state.blocks_num//args.nsteps)
+        update_mb_number=int(state.box_num//args.nsteps)
         for mb_id in tqdm(range(update_mb_number), disable=True):
             state, entropy, values, returns, losses, grad_norms = self.train_minibatch(state)
 
@@ -68,7 +72,7 @@ class trainer():
         modules = self.model
         returns, advs, values, log_likelihoods, entropys = self.get_mb_data(state)
 
-        alpha_loss = -1 * torch.mv((-1*entropys + args.target_entropy).detach(), modules['critic'].module.log_alpha).mean()
+        alpha_loss = -1 * torch.mv((-1*entropys + args.target_entropy).detach(), modules['critic'].log_alpha).mean()
 
         value_loss = F.mse_loss(values, returns.float().detach())
 
@@ -128,9 +132,10 @@ class trainer():
         mb_entropys = torch.stack(mb_entropy)
         if (state.packed_state[:,:,0]==1).all():
             last_values=torch.zeros(state.batch_size,dtype=torch.float)
-            last_values=move_to(last_values,state.device)
+            last_values=move_to(last_values,args.device)
+            logging.debug("all boxes are packed, last_values is 0")
         else:
-            hm = np.zeros((state.batch_size, 2, args.bin_x, args.bin_y)).astype(int)
+            hm = np.zeros((state.batch_size, 2, args.bin_x, args.bin_y))
             for i in range(state.batch_size):
                 hm_diff_x = np.insert(state.heightmap[i], 0, state.heightmap[i][0, :], axis=0)
                 hm_diff_x = np.delete(hm_diff_x, len(hm_diff_x) - 1, axis=0)
@@ -144,7 +149,7 @@ class trainer():
                 hm[i][1] = hm_diff_y
 
             hm = torch.tensor(hm).float()
-            hm = move_to(hm, state.device)
+            hm = move_to(hm, args.device)
             actor_modules = modules['actor']
 
             actor_encoder_out = actor_modules['encoder'](state.packed_state)
@@ -178,6 +183,7 @@ class trainer():
     def _run_batch(self, state):
         modules = self.model
         # update pack candidates for next packing step
+        # batch, 1
         last_gap = state.get_gap_size()
 
         s_log_p, r_log_p, value= pack_step(self.model, state)
@@ -223,15 +229,14 @@ def epoch_logger(epoch, state, values, returns, losses, entropy, grad_norms):
         print('grad_norm_c: {}, clipped_c: {}'.format(grad_norms[1], grad_norms_clipped[1]))
         
         print("entropy:{}".format(entropy))
-    logging.info("epoch", epoch)
-    logging.info("explained_variance", float(ev))
-    logging.info('entropy', entropy.item())
-        
-    logging.info('actor_loss', losses[0].item())
-    logging.info('value_loss', losses[1].item())
-    logging.info('alpha_loss', losses[2].item())
-    logging.info('avg_rewards', avg_rewards)
-    logging.info('gap_ratio', avg_gap_ratio)
-    logging.info('var_gap_ratio', var_gap_ratio)
+        logging.info(f"epoch: {epoch}")
+        logging.info(f"explained_variance: {float(ev)}")
+        logging.info(f"entropy: {entropy.item()}")   
+        logging.info(f"actor_loss: {losses[0].item()}")
+        logging.info(f"value_loss: {losses[1].item()}")
+        logging.info(f"alpha_loss: {losses[2].item()}")
+        logging.info(f"avg_rewards: {avg_rewards}")
+        logging.info(f"gap_ratio: {avg_gap_ratio}")
+        logging.info(f"var_gap_ratio: {var_gap_ratio}")
 
 

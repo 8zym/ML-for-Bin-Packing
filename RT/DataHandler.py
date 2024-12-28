@@ -71,7 +71,7 @@ def BPP_generator(box_num, bin_x, bin_y, bin_z):
 
         # 加入到I中
         I.append(child1)
-        I.append(child2)
+        I.append(child2)                
     
     array = np.array([[d["l"], d["w"], d["h"]] for d in I])
     return array

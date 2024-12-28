@@ -23,7 +23,7 @@ def main():
     print("start training...", flush=True)
     # log config
     logging.basicConfig(format='%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s',
-                    level=logging.DEBUG,
+                    level=logging.INFO,
                     filename=args.log_url,
                     filemode='a')
     # log_params(args)

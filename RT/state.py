@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils import move_to
 from Params import args
+import logging
 
 class PackAction():
     # (batch, 1)
@@ -34,8 +35,9 @@ class PackAction():
         self.rotate = rotate
 
     def set_shape(self, length, width, height):
-        # (batch, 3)
+        # batch, 3
         self.updated_shape = torch.stack([length, width, height], dim=-1)
+        logging.debug(f"updated_shape: {self.updated_shape.shape}")
 
     def get_shape(self):
         return self.updated_shape
@@ -66,25 +68,23 @@ def push_to_tensor_alternative(tensor, x):
 class StatePack3D():
 
     def __init__(self, batch_size, box_num):
-        self.container_size = [args.bin_x, args.bin_y, 2*args.bin_z]
-        self.action = PackAction(batch_size)
-        self.blocks_num = box_num
-        self.block_dim = 3
-        self.heightmap = np.zeros([batch_size,args.bin_x,args.bin_y]).astype(int)
-        self.batch_size= batch_size
+        self.container_size = [args.bin_x, args.bin_y, args.bin_z]
+        self.box_num = box_num
+        self.heightmap = np.zeros([batch_size,args.bin_x,args.bin_y])
+        self.batch_size = batch_size
         self.packed_state = torch.zeros(
             batch_size, box_num, 7, dtype=torch.float, device=args.device)
+        self.total_rewards = torch.zeros(
+            batch_size, dtype=torch.float, device=args.device)
+        self.valid_size = [0] * batch_size
+        self.empty_size = [0] * batch_size
+        self.action = PackAction(batch_size)
+        
+        # TODO
         self.index=0
         self.packed_rotate = torch.zeros(
             batch_size, box_num, 1, dtype=torch.int64, device=args.device)
-        self.total_rewards = torch.zeros(
-            batch_size, dtype=torch.float, device=args.device)
-        self.container = np.zeros([batch_size,args.bin_x,args.bin_y,2*args.bin_z]).astype(int)
-        self.positions = np.zeros((batch_size,box_num, self.block_dim)).astype(int)
-        self.reward_type = "C-soft"
-        self.stable = np.zeros((batch_size,box_num),dtype=bool)
-        self.valid_size = [0]*batch_size
-        self.empty_size = [0]*batch_size
+        self.positions = np.zeros((batch_size, box_num, 3)).astype(int)
         
     def put_reward(self, reward):
         self.total_rewards += reward
@@ -94,20 +94,21 @@ class StatePack3D():
 
     def update_env(self, batch, batch_size):
         # batch, box_num, 3
-        sp_initial=torch.FloatTensor(batch_size,self.blocks_num,1).fill_(0)
+        sp_initial=torch.FloatTensor(batch_size,self.box_num,1).fill_(0)
         sp_initial=move_to(sp_initial,args.device)
-        position_initial=torch.FloatTensor(batch_size,self.blocks_num,3).fill_(0)
+        position_initial=torch.FloatTensor(batch_size,self.box_num,3).fill_(0)
         position_initial=move_to(position_initial,args.device)
         self.packed_state=torch.cat([sp_initial,batch,position_initial],dim=2)
     
     def update_select(self, selected):
+        # batch, 1
         self.action.set_index(selected)
         box_length, box_width, box_height = self._get_action_box_shape()
         self.action.set_shape(box_length, box_width, box_height)
 
     def _get_action_box_shape(self):
         select_index = self.action.index.long()
-
+        # batch, box_num
         box_raw_l = self.packed_state[:, :, 1].squeeze(-1)
         box_raw_w = self.packed_state[:, :, 2].squeeze(-1)
         box_raw_h = self.packed_state[:, :, 3].squeeze(-1)
@@ -115,6 +116,8 @@ class StatePack3D():
         box_length = torch.gather(box_raw_l, -1, select_index).squeeze(-1)
         box_width = torch.gather(box_raw_w, -1, select_index).squeeze(-1)
         box_height = torch.gather(box_raw_h, -1, select_index).squeeze(-1)
+        logging.debug(f"box_length_shape: {box_length.shape}")
+        # batch
 
         return box_length, box_width, box_height
 
@@ -128,7 +131,9 @@ class StatePack3D():
 
         rotate_mask = torch.empty((rotate_types, batch_size), dtype=torch.bool)
         rotate_mask = move_to(rotate_mask, args.device)
+        # 5, batch
         select_index = self.action.index.long()
+        # batch, 1
 
         box_raw_x = self.packed_state[:, :, 1].squeeze(-1)
         box_raw_y = self.packed_state[:, :, 2].squeeze(-1)
@@ -194,10 +199,14 @@ class StatePack3D():
 
     def update_pack(self):
         select_index = self.action.index.squeeze(-1).long().tolist()
-
+        # [batch,] List
+        logging.debug(f"select_index: {select_index}")
         x=torch.tensor(self.positions[:,self.index,0]).unsqueeze(-1).float()
         y=torch.tensor(self.positions[:,self.index,1]).unsqueeze(-1).float()
         z=torch.tensor(self.positions[:,self.index,2]).unsqueeze(-1).float()
+        logging.debug(f"x: {x.shape}")
+        # batch, 1
+        # raise Exception("Explicit interrupt triggered!")
         x=move_to(x,args.device)
         y=move_to(y,args.device)
         z=move_to(z,args.device)
@@ -273,22 +282,19 @@ class StatePack3D():
         return right_bound
 
     def get_height(self):
-
-
+        # batch, 1
         return np.max(self.heightmap,axis=(1,2))
 
     def get_gap_size(self):
-
-        bin_volumn = self.get_height() * 100.0
-
+        bin_volumn = self.get_height() * args.bin_x * args.bin_y
         gap_volumn = bin_volumn - self.valid_size
-        gap_volumn=torch.tensor(gap_volumn)
-        gap_volumn=move_to(gap_volumn,args.device)
+        gap_volumn = torch.tensor(gap_volumn)
+        gap_volumn = move_to(gap_volumn,args.device)
         return gap_volumn
 
     def get_gap_ratio(self):
 
-        bin_volumn = self.get_height() *100.0
+        bin_volumn = self.get_height() * args.bin_x * args.bin_y
         bin_volumn=torch.tensor(bin_volumn)
         bin_volumn=move_to(bin_volumn,args.device)
         ebselong=torch.tensor([0.0001])
